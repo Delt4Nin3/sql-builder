@@ -16,3 +16,8 @@ travis-ci = { repository = "perdumonocle/sql-builder" }
 [dependencies]
 anyhow = "1.0"
 thiserror = "1.0"
+
+[features]
+default = ["postgres"]
+mysql = []
+postgres = []

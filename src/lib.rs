@@ -3755,7 +3755,8 @@ impl SqlBuilder {
                 // Make VALUES part
                 let values = values.join(", ");
 
-                // Make ON CONFLICT part
+                #[cfg(feature="postgres")]
+                // Make ON CONFLICT part for Postgres
                 let on_conflict = if let Some(on_conflict_action) = &self.on_conflict_action {
                     match on_conflict_action {
                         OnConflictAction::DoNothing => " ON CONFLICT DO NOTHING ".to_string(),
@@ -3763,6 +3764,24 @@ impl SqlBuilder {
                             if let (Some(on_conflict_key), on_conflict_sets) = (&self.on_conflict_key, &self.on_conflict_sets) {
                                 let on_conflict_sets = on_conflict_sets.iter().map(|key| { format!("{key} = EXCLUDED.{key}", key = key) }).collect::<Vec<String>>().join(", ");
                                 format!(" ON CONFLICT ({}) DO UPDATE SET {}", on_conflict_key, on_conflict_sets)
+                            } else {
+                                return Err(SqlBuilderError::NoValues.into());
+                            }
+                        }
+                    }
+                } else {
+                    "".to_string()
+                };
+
+                #[cfg(feature="mysql")]
+                // Make ON CONFLICT part for Mysql
+                let on_conflict = if let Some(on_conflict_action) = &self.on_conflict_action {
+                    match on_conflict_action {
+                        OnConflictAction::DoNothing => " ".to_string(),
+                        OnConflictAction::DoUpdate => {
+                            if let (Some(_), on_conflict_sets) = (&self.on_conflict_key, &self.on_conflict_sets) {
+                                let on_conflict_sets = on_conflict_sets.iter().map(|key| { format!("{key} = VALUES({key})", key = key) }).collect::<Vec<String>>().join(", ");
+                                format!(" ON DUPLICATE KEY UPDATE {}", on_conflict_sets)
                             } else {
                                 return Err(SqlBuilderError::NoValues.into());
                             }

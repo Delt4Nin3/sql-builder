@@ -240,6 +240,24 @@ impl Where {
         self
     }
 
+    pub fn is_not_in<S>(&mut self, smth: Vec<S>) -> &mut Self
+    where
+        S: ToString,
+    {
+        // Checks
+        let smth = smth.iter().map(|x| x.to_string()).collect::<Vec<String>>();
+        if smth.is_empty() {
+            self.error = Some(SqlBuilderError::NoWhereValue(self.text.clone()));
+            return self;
+        }
+
+        self.text.push_str(" not in ");
+        self.text.push_str("(");
+        self.text.push_str(&smth.join(", "));
+        self.text.push_str(")");
+        self
+    }
+
     pub fn between<S>(&mut self, min: S, max: S) -> &mut Self
     where
         S: ToString,

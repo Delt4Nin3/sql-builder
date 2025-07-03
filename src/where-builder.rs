@@ -383,6 +383,24 @@ impl Where {
         self
     }
 
+    pub fn custom_operator(&mut self, smth: &str, operator: &str) -> &mut Self {
+        // Checks
+        if smth.is_empty() {
+            self.error = Some(SqlBuilderError::NoWhereValue(self.text.clone()));
+            return self;
+        }
+
+        // Change
+        if let Some(prefix) = &self.prefix {
+            self.text.push(' ');
+            self.text.push_str(&prefix);
+            self.prefix = None;
+        }
+        self.text.push_str(&format!(" {} ", operator));
+        self.text.push_str(smth);
+        self
+    }
+
     pub fn build(&self) -> Result<String, SqlBuilderError> {
         match &self.error {
             Some(err) => Err(err.clone()),

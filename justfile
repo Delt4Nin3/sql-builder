@@ -3,16 +3,14 @@ set windows-shell := ["cmd.exe", "/c"]
 alias c := check
 alias b := build
 alias t := test
-
-alias ss:= stable
-alias sb:= beta
-alias sn:= nightly
-
-alias up:= update
-alias ur:= update-rust
+alias ss := stable
+alias sb := beta
+alias sn := nightly
+alias up := update
+alias ur := update-rust
 
 clear:
-    cls
+    (cls||clear)
 
 check: clear
     cargo check

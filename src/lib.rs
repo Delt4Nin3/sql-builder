@@ -221,6 +221,27 @@ enum JoinOperator {
     CrossJoin,
 }
 
+impl JoinOperator {
+    fn keyword(&self, natural: bool) -> &'static str {
+        match (self, natural) {
+            (Self::Join, true) => "NATURAL JOIN",
+            (Self::Join, false) => "JOIN",
+            (Self::LeftJoin, true) => "NATURAL LEFT JOIN",
+            (Self::LeftJoin, false) => "LEFT JOIN",
+            (Self::LeftOuterJoin, true) => "NATURAL LEFT OUTER JOIN",
+            (Self::LeftOuterJoin, false) => "LEFT OUTER JOIN",
+            (Self::RightJoin, true) => "NATURAL RIGHT JOIN",
+            (Self::RightJoin, false) => "RIGHT JOIN",
+            (Self::RightOuterJoin, true) => "NATURAL RIGHT OUTER JOIN",
+            (Self::RightOuterJoin, false) => "RIGHT OUTER JOIN",
+            (Self::InnerJoin, true) => "NATURAL INNER JOIN",
+            (Self::InnerJoin, false) => "INNER JOIN",
+            (Self::CrossJoin, true) => "NATURAL CROSS JOIN",
+            (Self::CrossJoin, false) => "CROSS JOIN",
+        }
+    }
+}
+
 
 #[derive(Clone)]
 enum OnConflictAction {
@@ -236,8 +257,7 @@ enum Values {
     Select(String),
 }
 
-impl SqlBuilder {
-    /// Default constructor for struct
+impl Default for SqlBuilder {
     fn default() -> Self {
         Self {
             statement: Statement::SelectFrom,
@@ -263,6 +283,9 @@ impl SqlBuilder {
             on_conflict_sets: Vec::new(),
         }
     }
+}
+
+impl SqlBuilder {
 
     /// Create SELECT query.
     /// You may specify comma separted list of tables.
@@ -618,29 +641,9 @@ impl SqlBuilder {
     /// # }
     /// ```
     pub fn join<S: ToString>(&mut self, table: S) -> &mut Self {
-        let mut text = match &self.join_operator {
-            JoinOperator::Join if self.join_natural => "NATURAL JOIN ",
-            JoinOperator::Join => "JOIN ",
-            JoinOperator::LeftJoin if self.join_natural => "NATURAL LEFT JOIN ",
-            JoinOperator::LeftJoin => "LEFT JOIN ",
-            JoinOperator::LeftOuterJoin if self.join_natural => "NATURAL LEFT OUTER JOIN ",
-            JoinOperator::LeftOuterJoin => "LEFT OUTER JOIN ",
-            JoinOperator::RightJoin if self.join_natural => "NATURAL RIGHT JOIN ",
-            JoinOperator::RightJoin => "RIGHT JOIN ",
-            JoinOperator::RightOuterJoin if self.join_natural => "NATURAL RIGHT OUTER JOIN ",
-            JoinOperator::RightOuterJoin => "RIGHT OUTER JOIN ",
-            JoinOperator::InnerJoin if self.join_natural => "NATURAL INNER JOIN ",
-            JoinOperator::InnerJoin => "INNER JOIN ",
-            JoinOperator::CrossJoin if self.join_natural => "NATURAL CROSS JOIN ",
-            JoinOperator::CrossJoin => "CROSS JOIN ",
-        }
-        .to_string();
-
+        let keyword = self.join_operator.keyword(self.join_natural);
         self.join_natural = false;
-
-        text.push_str(&table.to_string());
-
-        self.joins.push(text);
+        self.joins.push(format!("{} {}", keyword, table.to_string()));
         self
     }
 
@@ -1221,6 +1224,127 @@ impl SqlBuilder {
         self
     }
 
+    // --- Private where helpers ---
+
+    fn make_where_cmp<S, T>(&mut self, field: S, op: &str, value: T) -> Option<String>
+    where
+        S: ToString,
+        T: ToString,
+    {
+        let field = field.to_string();
+        if field.is_empty() {
+            self.set_error(&SqlBuilderError::NoWhereField);
+            return None;
+        }
+        let value = value.to_string();
+        if value.is_empty() {
+            self.set_error(&SqlBuilderError::NoWhereValue(field));
+            return None;
+        }
+        Some(format!("{} {} {}", field, op, value))
+    }
+
+    fn make_where_like<S, T>(&mut self, field: S, not: bool, prefix: &str, suffix: &str, mask: T, require_mask: bool) -> Option<String>
+    where
+        S: ToString,
+        T: ToString,
+    {
+        let field = field.to_string();
+        if field.is_empty() {
+            self.set_error(&SqlBuilderError::NoWhereField);
+            return None;
+        }
+        let mask = mask.to_string();
+        if require_mask && mask.is_empty() {
+            self.set_error(&SqlBuilderError::NoWhereValue(field));
+            return None;
+        }
+        let keyword = if not { "NOT LIKE" } else { "LIKE" };
+        Some(format!("{} {} '{}{}{}'", field, keyword, prefix, esc(&mask), suffix))
+    }
+
+    fn make_where_null<S>(&mut self, field: S, not: bool) -> Option<String>
+    where
+        S: ToString,
+    {
+        let field = field.to_string();
+        if field.is_empty() {
+            self.set_error(&SqlBuilderError::NoWhereField);
+            return None;
+        }
+        let keyword = if not { "IS NOT NULL" } else { "IS NULL" };
+        Some(format!("{} {}", field, keyword))
+    }
+
+    fn make_where_in_list<S, T>(&mut self, field: S, not: bool, list: &[T], quoted: bool) -> Option<String>
+    where
+        S: ToString,
+        T: ToString,
+    {
+        let field = field.to_string();
+        if field.is_empty() {
+            self.set_error(&SqlBuilderError::NoWhereField);
+            return None;
+        }
+        if list.is_empty() {
+            self.set_error(&SqlBuilderError::NoWhereList(field));
+            return None;
+        }
+        let items: Vec<String> = if quoted {
+            list.iter().map(|v| quote(v.to_string())).collect()
+        } else {
+            list.iter().map(|v| v.to_string()).collect()
+        };
+        let keyword = if not { "NOT IN" } else { "IN" };
+        Some(format!("{} {} ({})", field, keyword, items.join(", ")))
+    }
+
+    fn make_where_in_query_str<S, T>(&mut self, field: S, not: bool, query: T) -> Option<String>
+    where
+        S: ToString,
+        T: ToString,
+    {
+        let field = field.to_string();
+        if field.is_empty() {
+            self.set_error(&SqlBuilderError::NoWhereField);
+            return None;
+        }
+        let query = query.to_string();
+        if query.is_empty() {
+            self.set_error(&SqlBuilderError::NoWhereQuery(field));
+            return None;
+        }
+        let keyword = if not { "NOT IN" } else { "IN" };
+        Some(format!("{} {} ({})", field, keyword, query))
+    }
+
+    fn make_where_between<S, T, U>(&mut self, field: S, not: bool, min: T, max: U) -> Option<String>
+    where
+        S: ToString,
+        T: ToString,
+        U: ToString,
+    {
+        let field = field.to_string();
+        if field.is_empty() {
+            self.set_error(&SqlBuilderError::NoWhereField);
+            return None;
+        }
+        let min = min.to_string();
+        if min.is_empty() {
+            self.set_error(&SqlBuilderError::NoWhereValue(field));
+            return None;
+        }
+        let max = max.to_string();
+        if max.is_empty() {
+            self.set_error(&SqlBuilderError::NoWhereValue(field));
+            return None;
+        }
+        let keyword = if not { "NOT BETWEEN" } else { "BETWEEN" };
+        Some(format!("{} {} {} AND {}", field, keyword, min, max))
+    }
+
+    // --- End of private where helpers ---
+
     /// Add WHERE condition for equal parts.
     ///
     /// ```
@@ -1244,21 +1368,10 @@ impl SqlBuilder {
         S: ToString,
         T: ToString,
     {
-        // Checks
-        let field = field.to_string();
-        if field.is_empty() {
-            return self.set_error(&SqlBuilderError::NoWhereField);
+        if let Some(cond) = self.make_where_cmp(field, "=", value) {
+            self.and_where(&cond);
         }
-        let value = value.to_string();
-        if value.is_empty() {
-            return self.set_error(&SqlBuilderError::NoWhereValue(field));
-        }
-
-        // Change
-        let mut cond = field;
-        cond.push_str(" = ");
-        cond.push_str(&value);
-        self.and_where(&cond)
+        self
     }
 
     /// Add WHERE condition for non-equal parts.
@@ -1284,21 +1397,10 @@ impl SqlBuilder {
         S: ToString,
         T: ToString,
     {
-        // Checks
-        let field = field.to_string();
-        if field.is_empty() {
-            return self.set_error(&SqlBuilderError::NoWhereField);
+        if let Some(cond) = self.make_where_cmp(field, "<>", value) {
+            self.and_where(&cond);
         }
-        let value = value.to_string();
-        if value.is_empty() {
-            return self.set_error(&SqlBuilderError::NoWhereValue(field));
-        }
-
-        // Change
-        let mut cond = field;
-        cond.push_str(" <> ");
-        cond.push_str(&value);
-        self.and_where(&cond)
+        self
     }
 
     /// Add WHERE condition for field greater than value.
@@ -1325,21 +1427,10 @@ impl SqlBuilder {
         S: ToString,
         T: ToString,
     {
-        // Checks
-        let field = field.to_string();
-        if field.is_empty() {
-            return self.set_error(&SqlBuilderError::NoWhereField);
+        if let Some(cond) = self.make_where_cmp(field, ">", value) {
+            self.and_where(&cond);
         }
-        let value = value.to_string();
-        if value.is_empty() {
-            return self.set_error(&SqlBuilderError::NoWhereValue(field));
-        }
-
-        // Change
-        let mut cond = field;
-        cond.push_str(" > ");
-        cond.push_str(&value);
-        self.and_where(&cond)
+        self
     }
 
     /// Add WHERE condition for field not less than value.
@@ -1366,21 +1457,10 @@ impl SqlBuilder {
         S: ToString,
         T: ToString,
     {
-        // Checks
-        let field = field.to_string();
-        if field.is_empty() {
-            return self.set_error(&SqlBuilderError::NoWhereField);
+        if let Some(cond) = self.make_where_cmp(field, ">=", value) {
+            self.and_where(&cond);
         }
-        let value = value.to_string();
-        if value.is_empty() {
-            return self.set_error(&SqlBuilderError::NoWhereValue(field));
-        }
-
-        // Change
-        let mut cond = field;
-        cond.push_str(" >= ");
-        cond.push_str(&value);
-        self.and_where(&cond)
+        self
     }
 
     /// Add WHERE condition for field less than value.
@@ -1407,21 +1487,10 @@ impl SqlBuilder {
         S: ToString,
         T: ToString,
     {
-        // Checks
-        let field = field.to_string();
-        if field.is_empty() {
-            return self.set_error(&SqlBuilderError::NoWhereField);
+        if let Some(cond) = self.make_where_cmp(field, "<", value) {
+            self.and_where(&cond);
         }
-        let value = value.to_string();
-        if value.is_empty() {
-            return self.set_error(&SqlBuilderError::NoWhereValue(field));
-        }
-
-        // Change
-        let mut cond = field;
-        cond.push_str(" < ");
-        cond.push_str(&value);
-        self.and_where(&cond)
+        self
     }
 
     /// Add WHERE condition for field not greater than value.
@@ -1448,21 +1517,10 @@ impl SqlBuilder {
         S: ToString,
         T: ToString,
     {
-        // Checks
-        let field = field.to_string();
-        if field.is_empty() {
-            return self.set_error(&SqlBuilderError::NoWhereField);
+        if let Some(cond) = self.make_where_cmp(field, "<=", value) {
+            self.and_where(&cond);
         }
-        let value = value.to_string();
-        if value.is_empty() {
-            return self.set_error(&SqlBuilderError::NoWhereValue(field));
-        }
-
-        // Change
-        let mut cond = field;
-        cond.push_str(" <= ");
-        cond.push_str(&value);
-        self.and_where(&cond)
+        self
     }
 
     /// Add WHERE LIKE condition.
@@ -1488,18 +1546,10 @@ impl SqlBuilder {
         S: ToString,
         T: ToString,
     {
-        // Checks
-        let field = field.to_string();
-        if field.is_empty() {
-            return self.set_error(&SqlBuilderError::NoWhereField);
+        if let Some(cond) = self.make_where_like(field, false, "", "", mask, false) {
+            self.and_where(&cond);
         }
-
-        // Change
-        let mut cond = field;
-        cond.push_str(" LIKE '");
-        cond.push_str(&esc(&mask.to_string()));
-        cond.push('\'');
-        self.and_where(&cond)
+        self
     }
 
     /// Add WHERE LIKE %condition.
@@ -1525,18 +1575,10 @@ impl SqlBuilder {
         S: ToString,
         T: ToString,
     {
-        // Checks
-        let field = field.to_string();
-        if field.is_empty() {
-            return self.set_error(&SqlBuilderError::NoWhereField);
+        if let Some(cond) = self.make_where_like(field, false, "%", "", mask, false) {
+            self.and_where(&cond);
         }
-
-        // Change
-        let mut cond = field;
-        cond.push_str(" LIKE '%");
-        cond.push_str(&esc(&mask.to_string()));
-        cond.push('\'');
-        self.and_where(&cond)
+        self
     }
 
     /// Add WHERE LIKE condition%.
@@ -1562,18 +1604,10 @@ impl SqlBuilder {
         S: ToString,
         T: ToString,
     {
-        // Checks
-        let field = field.to_string();
-        if field.is_empty() {
-            return self.set_error(&SqlBuilderError::NoWhereField);
+        if let Some(cond) = self.make_where_like(field, false, "", "%", mask, false) {
+            self.and_where(&cond);
         }
-
-        // Change
-        let mut cond = field;
-        cond.push_str(" LIKE '");
-        cond.push_str(&esc(&mask.to_string()));
-        cond.push_str("%'");
-        self.and_where(&cond)
+        self
     }
 
     /// Add WHERE LIKE %condition%.
@@ -1599,18 +1633,10 @@ impl SqlBuilder {
         S: ToString,
         T: ToString,
     {
-        // Checks
-        let field = field.to_string();
-        if field.is_empty() {
-            return self.set_error(&SqlBuilderError::NoWhereField);
+        if let Some(cond) = self.make_where_like(field, false, "%", "%", mask, false) {
+            self.and_where(&cond);
         }
-
-        // Change
-        let mut cond = field;
-        cond.push_str(" LIKE '%");
-        cond.push_str(&esc(&mask.to_string()));
-        cond.push_str("%'");
-        self.and_where(&cond)
+        self
     }
 
     /// Add WHERE NOT LIKE condition.
@@ -1636,22 +1662,10 @@ impl SqlBuilder {
         S: ToString,
         T: ToString,
     {
-        // Checks
-        let field = field.to_string();
-        if field.is_empty() {
-            return self.set_error(&SqlBuilderError::NoWhereField);
+        if let Some(cond) = self.make_where_like(field, true, "", "", mask, true) {
+            self.and_where(&cond);
         }
-        let mask = mask.to_string();
-        if mask.is_empty() {
-            return self.set_error(&SqlBuilderError::NoWhereValue(field));
-        }
-
-        // Change
-        let mut cond = field;
-        cond.push_str(" NOT LIKE '");
-        cond.push_str(&esc(&mask));
-        cond.push('\'');
-        self.and_where(&cond)
+        self
     }
 
     /// Add WHERE NOT LIKE %condition.
@@ -1677,22 +1691,10 @@ impl SqlBuilder {
         S: ToString,
         T: ToString,
     {
-        // Checks
-        let field = field.to_string();
-        if field.is_empty() {
-            return self.set_error(&SqlBuilderError::NoWhereField);
+        if let Some(cond) = self.make_where_like(field, true, "%", "", mask, true) {
+            self.and_where(&cond);
         }
-        let mask = mask.to_string();
-        if mask.is_empty() {
-            return self.set_error(&SqlBuilderError::NoWhereValue(field));
-        }
-
-        // Change
-        let mut cond = field;
-        cond.push_str(" NOT LIKE '%");
-        cond.push_str(&esc(&mask));
-        cond.push('\'');
-        self.and_where(&cond)
+        self
     }
 
     /// Add WHERE NOT LIKE condition%.
@@ -1718,22 +1720,10 @@ impl SqlBuilder {
         S: ToString,
         T: ToString,
     {
-        // Checks
-        let field = field.to_string();
-        if field.is_empty() {
-            return self.set_error(&SqlBuilderError::NoWhereField);
+        if let Some(cond) = self.make_where_like(field, true, "", "%", mask, true) {
+            self.and_where(&cond);
         }
-        let mask = mask.to_string();
-        if mask.is_empty() {
-            return self.set_error(&SqlBuilderError::NoWhereValue(field));
-        }
-
-        // Change
-        let mut cond = field;
-        cond.push_str(" NOT LIKE '");
-        cond.push_str(&esc(&mask));
-        cond.push_str("%'");
-        self.and_where(&cond)
+        self
     }
 
     /// Add WHERE NOT LIKE %condition%.
@@ -1759,22 +1749,10 @@ impl SqlBuilder {
         S: ToString,
         T: ToString,
     {
-        // Checks
-        let field = field.to_string();
-        if field.is_empty() {
-            return self.set_error(&SqlBuilderError::NoWhereField);
+        if let Some(cond) = self.make_where_like(field, true, "%", "%", mask, true) {
+            self.and_where(&cond);
         }
-        let mask = mask.to_string();
-        if mask.is_empty() {
-            return self.set_error(&SqlBuilderError::NoWhereValue(field));
-        }
-
-        // Change
-        let mut cond = field;
-        cond.push_str(" NOT LIKE '%");
-        cond.push_str(&esc(&mask));
-        cond.push_str("%'");
-        self.and_where(&cond)
+        self
     }
 
     /// Add WHERE IS NULL condition.
@@ -1796,16 +1774,10 @@ impl SqlBuilder {
     /// # }
     /// ```
     pub fn and_where_is_null<S: ToString>(&mut self, field: S) -> &mut Self {
-        // Checks
-        let field = field.to_string();
-        if field.is_empty() {
-            return self.set_error(&SqlBuilderError::NoWhereField);
+        if let Some(cond) = self.make_where_null(field, false) {
+            self.and_where(&cond);
         }
-
-        // Change
-        let mut cond = field;
-        cond.push_str(" IS NULL");
-        self.and_where(&cond)
+        self
     }
 
     /// Add WHERE IS NOT NULL condition.
@@ -1827,16 +1799,10 @@ impl SqlBuilder {
     /// # }
     /// ```
     pub fn and_where_is_not_null<S: ToString>(&mut self, field: S) -> &mut Self {
-        // Checks
-        let field = field.to_string();
-        if field.is_empty() {
-            return self.set_error(&SqlBuilderError::NoWhereField);
+        if let Some(cond) = self.make_where_null(field, true) {
+            self.and_where(&cond);
         }
-
-        // Change
-        let mut cond = field;
-        cond.push_str(" IS NOT NULL");
-        self.and_where(&cond)
+        self
     }
 
     /// Add WHERE field IN (list).
@@ -1863,27 +1829,10 @@ impl SqlBuilder {
         S: ToString,
         T: ToString,
     {
-        // Checks
-        let field = field.to_string();
-        if field.is_empty() {
-            return self.set_error(&SqlBuilderError::NoWhereField);
+        if let Some(cond) = self.make_where_in_list(field, false, list, false) {
+            self.and_where(&cond);
         }
-        if list.is_empty() {
-            return self.set_error(&SqlBuilderError::NoWhereList(field));
-        }
-
-        // Change
-        let list: Vec<String> = list
-            .iter()
-            .map(|v| (*v).to_string())
-            .collect::<Vec<String>>();
-        let list = list.join(", ");
-
-        let mut cond = field;
-        cond.push_str(" IN (");
-        cond.push_str(&list);
-        cond.push(')');
-        self.and_where(&cond)
+        self
     }
 
     /// Add WHERE field IN (string list).
@@ -1910,27 +1859,10 @@ impl SqlBuilder {
         S: ToString,
         T: ToString,
     {
-        // Checks
-        let field = field.to_string();
-        if field.is_empty() {
-            return self.set_error(&SqlBuilderError::NoWhereField);
+        if let Some(cond) = self.make_where_in_list(field, false, list, true) {
+            self.and_where(&cond);
         }
-        if list.is_empty() {
-            return self.set_error(&SqlBuilderError::NoWhereList(field));
-        }
-
-        // Change
-        let list: Vec<String> = list
-            .iter()
-            .map(|v| quote((*v).to_string()))
-            .collect::<Vec<String>>();
-        let list = list.join(", ");
-
-        let mut cond = field;
-        cond.push_str(" IN (");
-        cond.push_str(&list);
-        cond.push(')');
-        self.and_where(&cond)
+        self
     }
 
     /// Add WHERE field NOT IN (list).
@@ -1957,27 +1889,10 @@ impl SqlBuilder {
         S: ToString,
         T: ToString,
     {
-        // Checks
-        let field = field.to_string();
-        if field.is_empty() {
-            return self.set_error(&SqlBuilderError::NoWhereField);
+        if let Some(cond) = self.make_where_in_list(field, true, list, false) {
+            self.and_where(&cond);
         }
-        if list.is_empty() {
-            return self.set_error(&SqlBuilderError::NoWhereList(field));
-        }
-
-        // Change
-        let list: Vec<String> = list
-            .iter()
-            .map(|v| (*v).to_string())
-            .collect::<Vec<String>>();
-        let list = list.join(", ");
-
-        let mut cond = field;
-        cond.push_str(" NOT IN (");
-        cond.push_str(&list);
-        cond.push(')');
-        self.and_where(&cond)
+        self
     }
 
     /// Add WHERE field NOT IN (string list).
@@ -2004,27 +1919,10 @@ impl SqlBuilder {
         S: ToString,
         T: ToString,
     {
-        // Checks
-        let field = field.to_string();
-        if field.is_empty() {
-            return self.set_error(&SqlBuilderError::NoWhereField);
+        if let Some(cond) = self.make_where_in_list(field, true, list, true) {
+            self.and_where(&cond);
         }
-        if list.is_empty() {
-            return self.set_error(&SqlBuilderError::NoWhereList(field));
-        }
-
-        // Change
-        let list: Vec<String> = list
-            .iter()
-            .map(|v| quote((*v).to_string()))
-            .collect::<Vec<String>>();
-        let list = list.join(", ");
-
-        let mut cond = field;
-        cond.push_str(" NOT IN (");
-        cond.push_str(&list);
-        cond.push(')');
-        self.and_where(&cond)
+        self
     }
 
     /// Add WHERE field IN (query).
@@ -2058,22 +1956,10 @@ impl SqlBuilder {
         S: ToString,
         T: ToString,
     {
-        // Checks
-        let field = field.to_string();
-        if field.is_empty() {
-            return self.set_error(&SqlBuilderError::NoWhereField);
+        if let Some(cond) = self.make_where_in_query_str(field, false, query) {
+            self.and_where(&cond);
         }
-        let query = query.to_string();
-        if query.is_empty() {
-            return self.set_error(&SqlBuilderError::NoWhereQuery(field));
-        }
-
-        // Change
-        let mut cond = field;
-        cond.push_str(" IN (");
-        cond.push_str(&query);
-        cond.push(')');
-        self.and_where(&cond)
+        self
     }
 
     /// Add WHERE field NOT IN (query).
@@ -2107,22 +1993,10 @@ impl SqlBuilder {
         S: ToString,
         T: ToString,
     {
-        // Checks
-        let field = field.to_string();
-        if field.is_empty() {
-            return self.set_error(&SqlBuilderError::NoWhereField);
+        if let Some(cond) = self.make_where_in_query_str(field, true, query) {
+            self.and_where(&cond);
         }
-        let query = query.to_string();
-        if query.is_empty() {
-            return self.set_error(&SqlBuilderError::NoWhereQuery(field));
-        }
-
-        // Change
-        let mut cond = field;
-        cond.push_str(" NOT IN (");
-        cond.push_str(&query);
-        cond.push(')');
-        self.and_where(&cond)
+        self
     }
 
     /// Add WHERE field BETWEEN values.
@@ -2150,27 +2024,10 @@ impl SqlBuilder {
         T: ToString,
         U: ToString,
     {
-        // Checks
-        let field = field.to_string();
-        if field.is_empty() {
-            return self.set_error(&SqlBuilderError::NoWhereField);
+        if let Some(cond) = self.make_where_between(field, false, min, max) {
+            self.and_where(&cond);
         }
-        let min = min.to_string();
-        if min.is_empty() {
-            return self.set_error(&SqlBuilderError::NoWhereValue(field));
-        }
-        let max = max.to_string();
-        if max.is_empty() {
-            return self.set_error(&SqlBuilderError::NoWhereValue(field));
-        }
-
-        // Change
-        let mut cond = field;
-        cond.push_str(" BETWEEN ");
-        cond.push_str(&min);
-        cond.push_str(" AND ");
-        cond.push_str(&max);
-        self.and_where(&cond)
+        self
     }
 
     /// Add WHERE field NOT BETWEEN values.
@@ -2198,27 +2055,10 @@ impl SqlBuilder {
         T: ToString,
         U: ToString,
     {
-        // Checks
-        let field = field.to_string();
-        if field.is_empty() {
-            return self.set_error(&SqlBuilderError::NoWhereField);
+        if let Some(cond) = self.make_where_between(field, true, min, max) {
+            self.and_where(&cond);
         }
-        let min = min.to_string();
-        if min.is_empty() {
-            return self.set_error(&SqlBuilderError::NoWhereValue(field));
-        }
-        let max = max.to_string();
-        if max.is_empty() {
-            return self.set_error(&SqlBuilderError::NoWhereValue(field));
-        }
-
-        // Change
-        let mut cond = field;
-        cond.push_str(" NOT BETWEEN ");
-        cond.push_str(&min);
-        cond.push_str(" AND ");
-        cond.push_str(&max);
-        self.and_where(&cond)
+        self
     }
 
     /// Add OR condition to the last WHERE condition.
@@ -2282,21 +2122,10 @@ impl SqlBuilder {
         S: ToString,
         T: ToString,
     {
-        // Checks
-        let field = field.to_string();
-        if field.is_empty() {
-            return self.set_error(&SqlBuilderError::NoWhereField);
+        if let Some(cond) = self.make_where_cmp(field, "=", value) {
+            self.or_where(&cond);
         }
-        let value = value.to_string();
-        if value.is_empty() {
-            return self.set_error(&SqlBuilderError::NoWhereValue(field));
-        }
-
-        // Change
-        let mut cond = field;
-        cond.push_str(" = ");
-        cond.push_str(&value);
-        self.or_where(&cond)
+        self
     }
 
     /// Add OR condition of non-equal parts to the last WHERE condition.
@@ -2323,21 +2152,10 @@ impl SqlBuilder {
         S: ToString,
         T: ToString,
     {
-        // Checks
-        let field = field.to_string();
-        if field.is_empty() {
-            return self.set_error(&SqlBuilderError::NoWhereField);
+        if let Some(cond) = self.make_where_cmp(field, "<>", value) {
+            self.or_where(&cond);
         }
-        let value = value.to_string();
-        if value.is_empty() {
-            return self.set_error(&SqlBuilderError::NoWhereValue(field));
-        }
-
-        // Change
-        let mut cond = field;
-        cond.push_str(" <> ");
-        cond.push_str(&value);
-        self.or_where(&cond)
+        self
     }
 
     /// Add OR condition for field greater than value to the last WHERE condition.
@@ -2365,21 +2183,10 @@ impl SqlBuilder {
         S: ToString,
         T: ToString,
     {
-        // Checks
-        let field = field.to_string();
-        if field.is_empty() {
-            return self.set_error(&SqlBuilderError::NoWhereField);
+        if let Some(cond) = self.make_where_cmp(field, ">", value) {
+            self.or_where(&cond);
         }
-        let value = value.to_string();
-        if value.is_empty() {
-            return self.set_error(&SqlBuilderError::NoWhereValue(field));
-        }
-
-        // Change
-        let mut cond = field;
-        cond.push_str(" > ");
-        cond.push_str(&value);
-        self.or_where(&cond)
+        self
     }
 
     /// Add OR condition for field not less than value to the last WHERE condition.
@@ -2407,21 +2214,10 @@ impl SqlBuilder {
         S: ToString,
         T: ToString,
     {
-        // Checks
-        let field = field.to_string();
-        if field.is_empty() {
-            return self.set_error(&SqlBuilderError::NoWhereField);
+        if let Some(cond) = self.make_where_cmp(field, ">=", value) {
+            self.or_where(&cond);
         }
-        let value = value.to_string();
-        if value.is_empty() {
-            return self.set_error(&SqlBuilderError::NoWhereValue(field));
-        }
-
-        // Change
-        let mut cond = field;
-        cond.push_str(" >= ");
-        cond.push_str(&value);
-        self.or_where(&cond)
+        self
     }
 
     /// Add OR condition for field less than value to the last WHERE condition.
@@ -2449,21 +2245,10 @@ impl SqlBuilder {
         S: ToString,
         T: ToString,
     {
-        // Checks
-        let field = field.to_string();
-        if field.is_empty() {
-            return self.set_error(&SqlBuilderError::NoWhereField);
+        if let Some(cond) = self.make_where_cmp(field, "<", value) {
+            self.or_where(&cond);
         }
-        let value = value.to_string();
-        if value.is_empty() {
-            return self.set_error(&SqlBuilderError::NoWhereValue(field));
-        }
-
-        // Change
-        let mut cond = field;
-        cond.push_str(" < ");
-        cond.push_str(&value);
-        self.or_where(&cond)
+        self
     }
 
     /// Add OR condition for field not greater than value to the last WHERE condition.
@@ -2491,21 +2276,10 @@ impl SqlBuilder {
         S: ToString,
         T: ToString,
     {
-        // Checks
-        let field = field.to_string();
-        if field.is_empty() {
-            return self.set_error(&SqlBuilderError::NoWhereField);
+        if let Some(cond) = self.make_where_cmp(field, "<=", value) {
+            self.or_where(&cond);
         }
-        let value = value.to_string();
-        if value.is_empty() {
-            return self.set_error(&SqlBuilderError::NoWhereValue(field));
-        }
-
-        // Change
-        let mut cond = field;
-        cond.push_str(" <= ");
-        cond.push_str(&value);
-        self.or_where(&cond)
+        self
     }
 
     /// Add OR LIKE condition to the last WHERE condition.
@@ -2532,18 +2306,10 @@ impl SqlBuilder {
         S: ToString,
         T: ToString,
     {
-        // Checks
-        let field = field.to_string();
-        if field.is_empty() {
-            return self.set_error(&SqlBuilderError::NoWhereField);
+        if let Some(cond) = self.make_where_like(field, false, "", "", mask, false) {
+            self.or_where(&cond);
         }
-
-        // Change
-        let mut cond = field;
-        cond.push_str(" LIKE '");
-        cond.push_str(&esc(&mask.to_string()));
-        cond.push('\'');
-        self.or_where(&cond)
+        self
     }
 
     /// Add OR LIKE condition to the last WHERE %condition.
@@ -2570,18 +2336,10 @@ impl SqlBuilder {
         S: ToString,
         T: ToString,
     {
-        // Checks
-        let field = field.to_string();
-        if field.is_empty() {
-            return self.set_error(&SqlBuilderError::NoWhereField);
+        if let Some(cond) = self.make_where_like(field, false, "%", "", mask, false) {
+            self.or_where(&cond);
         }
-
-        // Change
-        let mut cond = field;
-        cond.push_str(" LIKE '%");
-        cond.push_str(&esc(&mask.to_string()));
-        cond.push('\'');
-        self.or_where(&cond)
+        self
     }
 
     /// Add OR LIKE condition to the last WHERE condition%.
@@ -2608,18 +2366,10 @@ impl SqlBuilder {
         S: ToString,
         T: ToString,
     {
-        // Checks
-        let field = field.to_string();
-        if field.is_empty() {
-            return self.set_error(&SqlBuilderError::NoWhereField);
+        if let Some(cond) = self.make_where_like(field, false, "", "%", mask, false) {
+            self.or_where(&cond);
         }
-
-        // Change
-        let mut cond = field;
-        cond.push_str(" LIKE '");
-        cond.push_str(&esc(&mask.to_string()));
-        cond.push_str("%'");
-        self.or_where(&cond)
+        self
     }
 
     /// Add OR LIKE condition to the last WHERE %condition%.
@@ -2646,18 +2396,10 @@ impl SqlBuilder {
         S: ToString,
         T: ToString,
     {
-        // Checks
-        let field = field.to_string();
-        if field.is_empty() {
-            return self.set_error(&SqlBuilderError::NoWhereField);
+        if let Some(cond) = self.make_where_like(field, false, "%", "%", mask, false) {
+            self.or_where(&cond);
         }
-
-        // Change
-        let mut cond = field;
-        cond.push_str(" LIKE '%");
-        cond.push_str(&esc(&mask.to_string()));
-        cond.push_str("%'");
-        self.or_where(&cond)
+        self
     }
 
     /// Add OR NOT LIKE condition to the last WHERE condition.
@@ -2684,22 +2426,10 @@ impl SqlBuilder {
         S: ToString,
         T: ToString,
     {
-        // Checks
-        let field = field.to_string();
-        if field.is_empty() {
-            return self.set_error(&SqlBuilderError::NoWhereField);
+        if let Some(cond) = self.make_where_like(field, true, "", "", mask, true) {
+            self.or_where(&cond);
         }
-        let mask = mask.to_string();
-        if mask.is_empty() {
-            return self.set_error(&SqlBuilderError::NoWhereValue(field));
-        }
-
-        // Change
-        let mut cond = field;
-        cond.push_str(" NOT LIKE '");
-        cond.push_str(&esc(&mask));
-        cond.push('\'');
-        self.or_where(&cond)
+        self
     }
 
     /// Add OR NOT LIKE condition to the last WHERE %condition.
@@ -2726,22 +2456,10 @@ impl SqlBuilder {
         S: ToString,
         T: ToString,
     {
-        // Checks
-        let field = field.to_string();
-        if field.is_empty() {
-            return self.set_error(&SqlBuilderError::NoWhereField);
+        if let Some(cond) = self.make_where_like(field, true, "%", "", mask, true) {
+            self.or_where(&cond);
         }
-        let mask = mask.to_string();
-        if mask.is_empty() {
-            return self.set_error(&SqlBuilderError::NoWhereValue(field));
-        }
-
-        // Change
-        let mut cond = field;
-        cond.push_str(" NOT LIKE '%");
-        cond.push_str(&esc(&mask));
-        cond.push('\'');
-        self.or_where(&cond)
+        self
     }
 
     /// Add OR NOT LIKE condition to the last WHERE condition%.
@@ -2768,22 +2486,10 @@ impl SqlBuilder {
         S: ToString,
         T: ToString,
     {
-        // Checks
-        let field = field.to_string();
-        if field.is_empty() {
-            return self.set_error(&SqlBuilderError::NoWhereField);
+        if let Some(cond) = self.make_where_like(field, true, "", "%", mask, true) {
+            self.or_where(&cond);
         }
-        let mask = mask.to_string();
-        if mask.is_empty() {
-            return self.set_error(&SqlBuilderError::NoWhereValue(field));
-        }
-
-        // Change
-        let mut cond = field;
-        cond.push_str(" NOT LIKE '");
-        cond.push_str(&esc(&mask));
-        cond.push_str("%'");
-        self.or_where(&cond)
+        self
     }
 
     /// Add OR NOT LIKE condition to the last WHERE %condition%.
@@ -2810,22 +2516,10 @@ impl SqlBuilder {
         S: ToString,
         T: ToString,
     {
-        // Checks
-        let field = field.to_string();
-        if field.is_empty() {
-            return self.set_error(&SqlBuilderError::NoWhereField);
+        if let Some(cond) = self.make_where_like(field, true, "%", "%", mask, true) {
+            self.or_where(&cond);
         }
-        let mask = mask.to_string();
-        if mask.is_empty() {
-            return self.set_error(&SqlBuilderError::NoWhereValue(field));
-        }
-
-        // Change
-        let mut cond = field;
-        cond.push_str(" NOT LIKE '%");
-        cond.push_str(&esc(&mask));
-        cond.push_str("%'");
-        self.or_where(&cond)
+        self
     }
 
     /// Add OR IS NULL condition to the last WHERE condition.
@@ -2848,16 +2542,10 @@ impl SqlBuilder {
     /// # }
     /// ```
     pub fn or_where_is_null<S: ToString>(&mut self, field: S) -> &mut Self {
-        // Checks
-        let field = field.to_string();
-        if field.is_empty() {
-            return self.set_error(&SqlBuilderError::NoWhereField);
+        if let Some(cond) = self.make_where_null(field, false) {
+            self.or_where(&cond);
         }
-
-        // Change
-        let mut cond = field;
-        cond.push_str(" IS NULL");
-        self.or_where(&cond)
+        self
     }
 
     /// Add OR IS NOT NULL condition to the last WHERE condition.
@@ -2880,16 +2568,10 @@ impl SqlBuilder {
     /// # }
     /// ```
     pub fn or_where_is_not_null<S: ToString>(&mut self, field: S) -> &mut Self {
-        // Checks
-        let field = field.to_string();
-        if field.is_empty() {
-            return self.set_error(&SqlBuilderError::NoWhereField);
+        if let Some(cond) = self.make_where_null(field, true) {
+            self.or_where(&cond);
         }
-
-        // Change
-        let mut cond = field;
-        cond.push_str(" IS NOT NULL");
-        self.or_where(&cond)
+        self
     }
 
     /// Add OR field IN (list) to the last WHERE condition.
@@ -2917,27 +2599,10 @@ impl SqlBuilder {
         S: ToString,
         T: ToString,
     {
-        // Checks
-        let field = field.to_string();
-        if field.is_empty() {
-            return self.set_error(&SqlBuilderError::NoWhereField);
+        if let Some(cond) = self.make_where_in_list(field, false, list, false) {
+            self.or_where(&cond);
         }
-        if list.is_empty() {
-            return self.set_error(&SqlBuilderError::NoWhereList(field));
-        }
-
-        // Change
-        let list: Vec<String> = list
-            .iter()
-            .map(|v| (*v).to_string())
-            .collect::<Vec<String>>();
-        let list = list.join(", ");
-
-        let mut cond = field;
-        cond.push_str(" IN (");
-        cond.push_str(&list);
-        cond.push(')');
-        self.or_where(&cond)
+        self
     }
 
     /// Add OR field IN (string list) to the last WHERE condition.
@@ -2965,27 +2630,10 @@ impl SqlBuilder {
         S: ToString,
         T: ToString,
     {
-        // Checks
-        let field = field.to_string();
-        if field.is_empty() {
-            return self.set_error(&SqlBuilderError::NoWhereField);
+        if let Some(cond) = self.make_where_in_list(field, false, list, true) {
+            self.or_where(&cond);
         }
-        if list.is_empty() {
-            return self.set_error(&SqlBuilderError::NoWhereList(field));
-        }
-
-        // Change
-        let list: Vec<String> = list
-            .iter()
-            .map(|v| quote((*v).to_string()))
-            .collect::<Vec<String>>();
-        let list = list.join(", ");
-
-        let mut cond = field;
-        cond.push_str(" IN (");
-        cond.push_str(&list);
-        cond.push(')');
-        self.or_where(&cond)
+        self
     }
 
     /// Add OR field NOT IN (list) to the last WHERE condition.
@@ -3013,27 +2661,10 @@ impl SqlBuilder {
         S: ToString,
         T: ToString,
     {
-        // Checks
-        let field = field.to_string();
-        if field.is_empty() {
-            return self.set_error(&SqlBuilderError::NoWhereField);
+        if let Some(cond) = self.make_where_in_list(field, true, list, false) {
+            self.or_where(&cond);
         }
-        if list.is_empty() {
-            return self.set_error(&SqlBuilderError::NoWhereList(field));
-        }
-
-        // Change
-        let list: Vec<String> = list
-            .iter()
-            .map(|v| (*v).to_string())
-            .collect::<Vec<String>>();
-        let list = list.join(", ");
-
-        let mut cond = field;
-        cond.push_str(" NOT IN (");
-        cond.push_str(&list);
-        cond.push(')');
-        self.or_where(&cond)
+        self
     }
 
     /// Add OR field NOT IN (string list) to the last WHERE condition.
@@ -3061,27 +2692,10 @@ impl SqlBuilder {
         S: ToString,
         T: ToString,
     {
-        // Checks
-        let field = field.to_string();
-        if field.is_empty() {
-            return self.set_error(&SqlBuilderError::NoWhereField);
+        if let Some(cond) = self.make_where_in_list(field, true, list, true) {
+            self.or_where(&cond);
         }
-        if list.is_empty() {
-            return self.set_error(&SqlBuilderError::NoWhereList(field));
-        }
-
-        // Change
-        let list: Vec<String> = list
-            .iter()
-            .map(|v| quote((*v).to_string()))
-            .collect::<Vec<String>>();
-        let list = list.join(", ");
-
-        let mut cond = field;
-        cond.push_str(" NOT IN (");
-        cond.push_str(&list);
-        cond.push(')');
-        self.or_where(&cond)
+        self
     }
 
     /// Add OR field IN (query) to the last WHERE condition.
@@ -3116,22 +2730,10 @@ impl SqlBuilder {
         S: ToString,
         T: ToString,
     {
-        // Checks
-        let field = field.to_string();
-        if field.is_empty() {
-            return self.set_error(&SqlBuilderError::NoWhereField);
+        if let Some(cond) = self.make_where_in_query_str(field, false, query) {
+            self.or_where(&cond);
         }
-        let query = query.to_string();
-        if query.is_empty() {
-            return self.set_error(&SqlBuilderError::NoWhereQuery(field));
-        }
-
-        // Change
-        let mut cond = field;
-        cond.push_str(" IN (");
-        cond.push_str(&query);
-        cond.push(')');
-        self.or_where(&cond)
+        self
     }
 
     /// Add OR field NOT IN (query) to the last WHERE condition.
@@ -3166,22 +2768,10 @@ impl SqlBuilder {
         S: ToString,
         T: ToString,
     {
-        // Checks
-        let field = field.to_string();
-        if field.is_empty() {
-            return self.set_error(&SqlBuilderError::NoWhereField);
+        if let Some(cond) = self.make_where_in_query_str(field, true, query) {
+            self.or_where(&cond);
         }
-        let query = query.to_string();
-        if query.is_empty() {
-            return self.set_error(&SqlBuilderError::NoWhereQuery(field));
-        }
-
-        // Change
-        let mut cond = field;
-        cond.push_str(" NOT IN (");
-        cond.push_str(&query);
-        cond.push(')');
-        self.or_where(&cond)
+        self
     }
 
     /// Add OR field BETWEEN values to the last WHERE condition.
@@ -3210,27 +2800,10 @@ impl SqlBuilder {
         T: ToString,
         U: ToString,
     {
-        // Checks
-        let field = field.to_string();
-        if field.is_empty() {
-            return self.set_error(&SqlBuilderError::NoWhereField);
+        if let Some(cond) = self.make_where_between(field, false, min, max) {
+            self.or_where(&cond);
         }
-        let min = min.to_string();
-        if min.is_empty() {
-            return self.set_error(&SqlBuilderError::NoWhereValue(field));
-        }
-        let max = max.to_string();
-        if max.is_empty() {
-            return self.set_error(&SqlBuilderError::NoWhereValue(field));
-        }
-
-        // Change
-        let mut cond = field;
-        cond.push_str(" BETWEEN ");
-        cond.push_str(&min);
-        cond.push_str(" AND ");
-        cond.push_str(&max);
-        self.or_where(&cond)
+        self
     }
 
     /// Add OR field NOT BETWEEN values to the last WHERE condition.
@@ -3259,27 +2832,10 @@ impl SqlBuilder {
         T: ToString,
         U: ToString,
     {
-        // Checks
-        let field = field.to_string();
-        if field.is_empty() {
-            return self.set_error(&SqlBuilderError::NoWhereField);
+        if let Some(cond) = self.make_where_between(field, true, min, max) {
+            self.or_where(&cond);
         }
-        let min = min.to_string();
-        if min.is_empty() {
-            return self.set_error(&SqlBuilderError::NoWhereValue(field));
-        }
-        let max = max.to_string();
-        if max.is_empty() {
-            return self.set_error(&SqlBuilderError::NoWhereValue(field));
-        }
-
-        // Change
-        let mut cond = field;
-        cond.push_str(" NOT BETWEEN ");
-        cond.push_str(&min);
-        cond.push_str(" AND ");
-        cond.push_str(&max);
-        self.or_where(&cond)
+        self
     }
 
     /// Union query with subquery.
@@ -3731,6 +3287,57 @@ impl SqlBuilder {
         Ok(sql)
     }
 
+    #[cfg(all(feature = "postgres", not(feature = "mysql")))]
+    fn make_on_conflict(&self) -> Result<String> {
+        if let Some(on_conflict_action) = &self.on_conflict_action {
+            match on_conflict_action {
+                OnConflictAction::DoNothing => Ok(" ON CONFLICT DO NOTHING ".to_string()),
+                OnConflictAction::DoUpdate => {
+                    if let (Some(on_conflict_key), on_conflict_sets) = (&self.on_conflict_key, &self.on_conflict_sets) {
+                        let sets = on_conflict_sets
+                            .iter()
+                            .map(|key| format!("{key} = EXCLUDED.{key}", key = key))
+                            .collect::<Vec<String>>()
+                            .join(", ");
+                        Ok(format!(" ON CONFLICT ({}) DO UPDATE SET {}", on_conflict_key, sets))
+                    } else {
+                        Err(SqlBuilderError::NoValues.into())
+                    }
+                }
+            }
+        } else {
+            Ok(String::new())
+        }
+    }
+
+    #[cfg(feature = "mysql")]
+    fn make_on_conflict(&self) -> Result<String> {
+        if let Some(on_conflict_action) = &self.on_conflict_action {
+            match on_conflict_action {
+                OnConflictAction::DoNothing => Ok(String::new()),
+                OnConflictAction::DoUpdate => {
+                    if let (Some(_), on_conflict_sets) = (&self.on_conflict_key, &self.on_conflict_sets) {
+                        let sets = on_conflict_sets
+                            .iter()
+                            .map(|key| format!("{key} = VALUES({key})", key = key))
+                            .collect::<Vec<String>>()
+                            .join(", ");
+                        Ok(format!(" ON DUPLICATE KEY UPDATE {}", sets))
+                    } else {
+                        Err(SqlBuilderError::NoValues.into())
+                    }
+                }
+            }
+        } else {
+            Ok(String::new())
+        }
+    }
+
+    #[cfg(not(any(feature = "postgres", feature = "mysql")))]
+    fn make_on_conflict(&self) -> Result<String> {
+        Ok(String::new())
+    }
+
     /// Build SQL command for INSERT statement
     fn sql_insert(&self) -> Result<String> {
         // Checks
@@ -3755,41 +3362,8 @@ impl SqlBuilder {
                 // Make VALUES part
                 let values = values.join(", ");
 
-                #[cfg(feature="postgres")]
-                // Make ON CONFLICT part for Postgres
-                let on_conflict = if let Some(on_conflict_action) = &self.on_conflict_action {
-                    match on_conflict_action {
-                        OnConflictAction::DoNothing => " ON CONFLICT DO NOTHING ".to_string(),
-                        OnConflictAction::DoUpdate => {
-                            if let (Some(on_conflict_key), on_conflict_sets) = (&self.on_conflict_key, &self.on_conflict_sets) {
-                                let on_conflict_sets = on_conflict_sets.iter().map(|key| { format!("{key} = EXCLUDED.{key}", key = key) }).collect::<Vec<String>>().join(", ");
-                                format!(" ON CONFLICT ({}) DO UPDATE SET {}", on_conflict_key, on_conflict_sets)
-                            } else {
-                                return Err(SqlBuilderError::NoValues.into());
-                            }
-                        }
-                    }
-                } else {
-                    "".to_string()
-                };
-
-                #[cfg(feature="mysql")]
-                // Make ON CONFLICT part for Mysql
-                let on_conflict = if let Some(on_conflict_action) = &self.on_conflict_action {
-                    match on_conflict_action {
-                        OnConflictAction::DoNothing => " ".to_string(),
-                        OnConflictAction::DoUpdate => {
-                            if let (Some(_), on_conflict_sets) = (&self.on_conflict_key, &self.on_conflict_sets) {
-                                let on_conflict_sets = on_conflict_sets.iter().map(|key| { format!("{key} = VALUES({key})", key = key) }).collect::<Vec<String>>().join(", ");
-                                format!(" ON DUPLICATE KEY UPDATE {}", on_conflict_sets)
-                            } else {
-                                return Err(SqlBuilderError::NoValues.into());
-                            }
-                        }
-                    }
-                } else {
-                    "".to_string()
-                };
+                // Make ON CONFLICT part
+                let on_conflict = self.make_on_conflict()?;
 
                 // Make RETURNING part
                 let returning = self.make_returning();
